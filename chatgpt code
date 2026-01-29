@@ -1,0 +1,85 @@
+#!/bin/bash
+
+WATCHLIST="watchdirs.txt"
+DB="processed.db"
+MAX_MB=60
+AUDIO_BITRATE=96000
+
+touch "$DB"
+
+hash_exists () {
+    grep -q "$1" "$DB"
+}
+
+add_hash () {
+    echo "$1" >> "$DB"
+}
+
+wait_for_stable_file () {
+    FILE="$1"
+    PREV=0
+    while true; do
+        CUR=$(stat -f%z "$FILE" 2>/dev/null) || return 1
+        [[ "$CUR" == "$PREV" ]] && break
+        PREV="$CUR"
+        sleep 2
+    done
+}
+
+process_file () {
+    FILE="$1"
+
+    [[ ! -f "$FILE" ]] && return
+    EXT="${FILE##*.}"
+    [[ "${EXT,,}" != "mov" ]] && return
+    [[ "$FILE" == *_compressed.mp4 ]] && return
+
+    wait_for_stable_file "$FILE" || return
+
+    HASH=$(shasum -a 1 "$FILE" | awk '{print $1}')
+
+    if hash_exists "$HASH"; then
+        echo "Already processed: $FILE"
+        return
+    fi
+
+    echo "Processing new/modified file: $FILE"
+
+    DURATION=$(ffprobe -v error -show_entries format=duration \
+    -of default=noprint_wrappers=1:nokey=1 "$FILE")
+
+    DURATION=${DURATION%.*}
+    [[ "$DURATION" -le 0 ]] && return
+
+    TARGET_BITS=$((MAX_MB * 1024 * 1024 * 8))
+    TOTAL_BITRATE=$((TARGET_BITS / DURATION))
+    VIDEO_BITRATE=$((TOTAL_BITRATE - AUDIO_BITRATE))
+
+    OUTFILE="${FILE%.*}_compressed.mp4"
+
+    nice -n 10 ffmpeg -y -i "$FILE" \
+    -vf "scale='min(1280,iw)':-2" \
+    -c:v libx264 -preset slow \
+    -b:v ${VIDEO_BITRATE} -maxrate ${VIDEO_BITRATE} \
+    -bufsize $((VIDEO_BITRATE * 2)) \
+    -pix_fmt yuv420p -movflags +faststart \
+    -c:a aac -b:a 96k \
+    "$OUTFILE"
+
+    add_hash "$HASH"
+    echo "Finished: $OUTFILE"
+}
+
+export -f process_file wait_for_stable_file hash_exists add_hash
+export DB MAX_MB AUDIO_BITRATE
+
+while read DIR; do
+    fswatch -0 \
+    --event Created \
+    --event Updated \
+    --event Renamed \
+    -r "$DIR" | while IFS= read -r -d "" FILE
+    do
+        bash -c "process_file \"$FILE\""
+    done
+done < "$WATCHLIST"
