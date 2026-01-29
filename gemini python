@@ -1,0 +1,143 @@
+import sys
+import time
+import os
+import logging
+import subprocess
+import json
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+# Configuration
+WATCH_LIST_FILE = "watchdirs.txt"
+PROCESSED_DB = "processed_files.json"
+MAX_SIZE_MB = 60
+TARGET_RES = 1280 # width
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+class VideoHandler(FileSystemEventHandler):
+    def __init__(self):
+        self.processed = self.load_db()
+
+    def load_db(self):
+        if os.path.exists(PROCESSED_DB):
+            with open(PROCESSED_DB, 'r') as f:
+                return set(json.load(f))
+        return set()
+
+    def save_db(self):
+        with open(PROCESSED_DB, 'w') as f:
+            json.dump(list(self.processed), f)
+
+    def on_created(self, event):
+        self.process(event.src_path)
+
+    def on_modified(self, event):
+        self.process(event.src_path)
+
+    def get_duration(self, file_path):
+        try:
+            cmd = [
+                'ffprobe', '-v', 'error', '-show_entries', 
+                'format=duration', '-of', 
+                'default=noprint_wrappers=1:nokey=1', file_path
+            ]
+            result = subprocess.check_output(cmd).decode('utf-8').strip()
+            return float(result)
+        except:
+            return None
+
+    def wait_for_file_ready(self, file_path):
+        """Waits until file size stops changing (upload complete)."""
+        last_size = -1
+        retries = 10
+        while retries > 0:
+            try:
+                size = os.path.getsize(file_path)
+                if size == last_size and size > 0:
+                    return True
+                last_size = size
+                time.sleep(2)
+                retries -= 1
+            except FileNotFoundError:
+                return False
+        return False
+
+    def process(self, file_path):
+        if not file_path.lower().endswith(".mov"):
+            return
+        if "_compressed" in file_path:
+            return
+        if file_path in self.processed:
+            return
+
+        # Debounce/Wait for upload to finish
+        if not self.wait_for_file_ready(file_path):
+            logging.warning(f"File unstable or removed: {file_path}")
+            return
+
+        logging.info(f"Processing: {file_path}")
+
+        duration = self.get_duration(file_path)
+        if not duration:
+            return
+
+        # Calculate Bitrate for 60MB Target
+        # (60MB * 8192 bits/KB) / duration_seconds = kbits/sec
+        target_total_bitrate = (MAX_SIZE_MB * 8192) / duration
+        video_bitrate = int(target_total_bitrate - 96) # subtract audio
+        
+        # Clamp bitrate
+        video_bitrate = max(500, min(video_bitrate, 5000))
+
+        output_path = os.path.splitext(file_path)[0] + "_compressed.mp4"
+
+        try:
+            # Construct FFMPEG command
+            # Using subprocess directly for granular control over flags
+            cmd = [
+                'ffmpeg', '-y', '-i', file_path,
+                '-vf', f"scale='min({TARGET_RES},iw)':-2",
+                '-c:v', 'libx264', '-preset', 'medium',
+                '-b:v', f'{video_bitrate}k', '-maxrate', f'{video_bitrate}k',
+                '-bufsize', f'{video_bitrate*2}k',
+                '-c:a', 'aac', '-b:a', '96k',
+                '-movflags', '+faststart',
+                output_path
+            ]
+            
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            logging.info(f"Compressed: {output_path} (Bitrate: {video_bitrate}k)")
+            
+            self.processed.add(file_path)
+            self.save_db()
+            
+        except subprocess.CalledProcessError as e:
+            logging.error(f"FFmpeg failed for {file_path}")
+
+if __name__ == "__main__":
+    if not os.path.exists(WATCH_LIST_FILE):
+        print(f"Please create {WATCH_LIST_FILE}")
+        sys.exit(1)
+
+    with open(WATCH_LIST_FILE, 'r') as f:
+        paths = [line.strip() for line in f if line.strip()]
+
+    observer = Observer()
+    handler = VideoHandler()
+
+    for path in paths:
+        if os.path.exists(path):
+            logging.info(f"Watching: {path}")
+            observer.schedule(handler, path, recursive=False)
+        else:
+            logging.warning(f"Path not found: {path}")
+
+    observer.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
