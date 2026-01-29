@@ -1,3 +1,5 @@
+# pip install watchdog ffmpeg-python
+
 import sys
 import time
 import os
