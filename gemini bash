@@ -1,0 +1,108 @@
+#!/bin/bash
+
+WATCHLIST="watchdirs.txt"
+DB="processed.db"
+MAX_MB=60
+AUDIO_BITRATE=96 # kbits
+
+# Ensure DB exists
+touch "$DB"
+
+# 1. FIXED: Function to check if file is currently growing (uploading/copying)
+wait_for_stable_file () {
+    local f="$1"
+    local prev_size=-1
+    local cur_size=0
+    
+    # Wait up to 30 seconds for stability
+    for _ in {1..15}; do
+        # MacOS stat command syntax
+        cur_size=$(stat -f%z "$f" 2>/dev/null) || return 1
+        
+        if [[ "$prev_size" -eq "$cur_size" && "$cur_size" -gt 0 ]]; then
+            return 0
+        fi
+        prev_size="$cur_size"
+        sleep 2
+    done
+    return 1
+}
+
+process_file () {
+    local file="$1"
+
+    # Validation
+    [[ ! -f "$file" ]] && return
+    
+    # 2. FIXED: MacOS compatible lowercase extraction
+    filename=$(basename "$file")
+    ext="${filename##*.}"
+    ext_lower=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$ext_lower" != "mov" ]]; then return; fi
+    if [[ "$file" == *"_compressed.mp4" ]]; then return; fi
+
+    # Check DB using grep (fast check based on path first)
+    if grep -Fq "$file" "$DB"; then
+        echo "Skipping known file: $file"
+        return
+    fi
+
+    # Ensure file is done copying
+    wait_for_stable_file "$file" || return
+
+    echo "[+] Detected: $file"
+
+    # Calculate Duration
+    duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$file")
+    duration=${duration%.*} # Floor to integer
+    
+    if [[ -z "$duration" || "$duration" -le 0 ]]; then 
+        echo "Error reading duration"
+        return
+    fi
+
+    # 3. FIXED: Math logic for 60MB limit
+    # (Size in bits) / duration = bitrate
+    target_bits=$((MAX_MB * 8192 * 1024)) # 60 * 8 * 1024 * 1024 (approx)
+    total_bitrate_k=$((target_bits / duration / 1000))
+    video_bitrate_k=$((total_bitrate_k - AUDIO_BITRATE))
+
+    # Safety clamp: Don't let bitrate go too low (e.g. < 300k) or too high
+    if (( video_bitrate_k < 300 )); then video_bitrate_k=300; fi
+    if (( video_bitrate_k > 4000 )); then video_bitrate_k=4000; fi
+
+    outfile="${file%.*}_compressed.mp4"
+
+    echo "Targeting ~${video_bitrate_k}k video bitrate for ${MAX_MB}MB limit..."
+
+    # 4. FIXED: FFMPEG optimizations
+    # -preset veryfast: faster encoding for "watching" folder scenarios
+    # -movflags +faststart: Moves metadata to front (web optimized)
+    # -n: Never overwrite existing output automatically
+    nice -n 10 ffmpeg -n -v error -stats \
+        -i "$file" \
+        -vf "scale='min(1280,iw)':-2" \
+        -c:v libx264 -preset veryfast \
+        -b:v "${video_bitrate_k}k" -maxrate "${video_bitrate_k}k" -bufsize "$((video_bitrate_k * 2))k" \
+        -c:a aac -b:a "${AUDIO_BITRATE}k" \
+        "$outfile"
+
+    # Log to DB
+    echo "$file" >> "$DB"
+    echo "[✔] Finished: $outfile"
+}
+
+export -f process_file wait_for_stable_file
+export DB MAX_MB AUDIO_BITRATE
+
+echo "Watching folders listed in $WATCHLIST..."
+
+# 5. FIXED: Feed all directories to fswatch at once
+# xargs handles the parallel execution/queueing better than a while read loop
+cat "$WATCHLIST" | tr '\n' '\0' | xargs -0 fswatch -0 \
+    --event Created \
+    --event Updated \
+    --event Renamed \
+    --event MovedTo \
+    | xargs -0 -n 1 -I {} bash -c 'process_file "$@"' _ {}
