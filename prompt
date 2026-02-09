@@ -1,0 +1,4 @@
+prompt:
+
+ffmpeg code , for watching a folder list from text file(high priority) or/and directly watching entire mac volume where the folder exists, seeing a newly created/uploaded .mov format file, and converting it to low res vbr1 and size upto 60 mbs or whatever is better quality lowest size.
+i dont want this script to encode old files, strictly new files or newly modified files as someone can just edit a file or delete old and upload same file
