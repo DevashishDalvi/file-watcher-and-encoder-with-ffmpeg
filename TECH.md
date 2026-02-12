@@ -321,3 +321,5 @@ backup systems, version control systems, and distributed storage platforms.
 It ensures that system cost scales with change volume rather than
 total namespace size, which is the critical requirement for
 large network-mounted media repositories.
+
+output_path
