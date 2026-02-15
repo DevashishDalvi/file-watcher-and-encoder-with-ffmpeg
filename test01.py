@@ -10,14 +10,16 @@ log_file = logs_dir / "log.txt"
 __log_handler = log_file.open('a', encoding="utf-8")
 atexit.register(__log_handler.close)
 
+DEBUG = False
+
 def get_mtime(path):
     try:
         return os.path.getmtime(path)
     except OSError as e:
         return -1
 
-def log(msg: str, debug: bool = False):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def log(msg: str, debug: bool = DEBUG):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
     formatted = f"[{timestamp}] {msg}"
 
     __log_handler.write(formatted + "\n")
@@ -25,4 +27,6 @@ def log(msg: str, debug: bool = False):
 
     if debug:
         print(formatted, flush=True)
+
+log("printing lines...")
 
