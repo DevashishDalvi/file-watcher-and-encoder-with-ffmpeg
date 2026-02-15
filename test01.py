@@ -8,7 +8,7 @@ from watchdog.observers.polling import PollingObserver as Observer
 
 class WatcherHandler(FileSystemEventHandler):
     def log(self, msg):
-        now = datetime.datetime.now()
+        now = dt.now()
         print(f"[{now:%I:%M %p}] {msg}")
 
     # Triggered when a file or directory is modified
