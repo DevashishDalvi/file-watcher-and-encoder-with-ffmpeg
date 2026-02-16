@@ -10,7 +10,7 @@ log_file = logs_dir / "log.txt"
 __log_handler = log_file.open('a', encoding="utf-8")
 atexit.register(__log_handler.close)
 
-DEBUG = False
+DEBUG = True
 
 def get_mtime(path):
     try:
@@ -28,5 +28,9 @@ def log(msg: str, debug: bool = DEBUG):
     if debug:
         print(formatted, flush=True)
 
-log("printing lines...")
+def path_directories(path):
+    __dir = (x for x in Path(path).iterdir() if x.is_dir())
+    for i in __dir:
+        log(f"{i.name:<35}: {i.stat().st_mtime}")
 
+path_directories("/Volumes/FLAME_MEDIA/OUTPUT")
